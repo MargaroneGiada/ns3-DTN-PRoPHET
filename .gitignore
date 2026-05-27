@@ -1,0 +1,12 @@
+*.tr     
+*.pcap   
+*.dat     
+*.csv     
+*.xml     
+*.o       
+*.so      
+*.a       
+build/
+cmake-cache/
+out/
+.vscode/
