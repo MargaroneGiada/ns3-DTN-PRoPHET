@@ -5,16 +5,17 @@
 #include "ns3/socket.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/timer.h"
-#include <map>
-#include <unordered_set>
-#include <iostream>
-#include "prophet-header.h"
 #include "ns3/log.h"
 #include "ns3/simulator.h"
 #include "ns3/udp-socket-factory.h"
 #include "ns3/double.h"
 #include "arpa/inet.h"
 #include "ns3/random-variable-stream.h"
+#include "ns3/traced-callback.h"
+#include <map>
+#include <unordered_set>
+#include <iostream>
+#include "prophet-header.h"
 
 using namespace ns3;
 
@@ -42,9 +43,14 @@ private:
     std::list<BufferedMessage> m_buffer;
     uint32_t m_maxBufferSize;
     double m_threshold;
+    uint32_t m_numNodes;
+    uint32_t m_localMsgCount; 
+    EventId m_trafficTimer;
 
     void SendBeacon ();
     void ReceivePacket (Ptr<Socket> socket);
+    TracedCallback<uint32_t, uint32_t> m_txTrace; // trasmissione   
+    TracedCallback<uint32_t, uint32_t, double> m_rxTrace; // recezione
 
 public:
     ProphetApplication ();
@@ -54,6 +60,10 @@ public:
 
     void SetThreshold (double t);
     void SetMaxBufferSize (uint32_t size);
+
+    void GenerateTraffic (); 
+    void SetNumNodes (uint32_t n); 
+
 
 protected:
     virtual void StartApplication (void) override;

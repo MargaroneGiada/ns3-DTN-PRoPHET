@@ -9,11 +9,25 @@
 #include "ns3/internet-module.h"
 #include "prophet-header.h"
 #include "prophet-application.h"
-// #include "ns3/netanim-module.h" // per NETANIM
+#include "ns3/netanim-module.h" // per NETANIM
+#include <string>
 
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE ("prophet");
+
+uint32_t g_totalGenerated = 0;
+uint32_t g_totalDelivered = 0;
+double g_cumulativeDelay = 0.0;
+
+void PacketGeneratedCallback(uint32_t nodeId, uint32_t msgId) {
+    g_totalGenerated++;
+}
+
+void PacketDeliveredCallback(uint32_t nodeId, uint32_t msgId, double delay) {
+    g_totalDelivered++;
+    g_cumulativeDelay += delay;
+}
 
 struct ZoneBounds {
     double xMin;
@@ -65,9 +79,11 @@ int main(int argc, char** argv){
     cmd.Parse (argc, argv);
 
     NS_LOG_INFO (" --- Inizio Simulazione ProPHET ---");
-    NS_LOG_INFO ("Nodi: " << numNodes << " | Buffer: " << bufferSize << " | Threshold: " << threshold << "| Seed: " << seed);
+    NS_LOG_INFO ("Nodi: " << numNodes << " | Buffer: " << bufferSize << " | Threshold: " << threshold << " | Seed: " << seed);
 
     RngSeedManager::SetSeed (seed);
+    Config::SetDefault ("ns3::ArpCache::PendingQueueSize", UintegerValue (500));
+    Config::SetDefault ("ns3::ArpCache::MaxRetries", UintegerValue (10));
 
     NodeContainer nodes;
     nodes.Create(numNodes);
@@ -205,27 +221,67 @@ int main(int argc, char** argv){
     ApplicationContainer dtnApps;
 
     for (uint32_t i = 0; i < numNodes; ++i) {
-        // 1. Creiamo un'istanza della nostra applicazione personalizzata
         Ptr<ProphetApplication> app = CreateObject<ProphetApplication> ();
 
-        // 2. CONFIGURAZIONE DINAMICA: Passiamo le variabili lette da CommandLine!
         app->SetThreshold (threshold);
         app->SetMaxBufferSize (bufferSize);
+        app->SetNumNodes (numNodes);
 
-        // 3. Associazioni di sistema: diciamo all'app di quanti millisecondi impostare lo stop se serve
+        app->TraceConnectWithoutContext ("TxData", MakeCallback (&PacketGeneratedCallback));
+        app->TraceConnectWithoutContext ("RxData", MakeCallback (&PacketDeliveredCallback));
+
         app->SetStartTime (Seconds (1.0));
         app->SetStopTime (Seconds (simTime));
 
-        // 4. Installiamo fisicamente l'applicazione all'interno del nodo i-esimo
         nodes.Get (i)->AddApplication (app);
         
-        // Aggiungiamo l'app al contenitore generale
         dtnApps.Add (app);
     }
     
 
     Simulator::Stop(Seconds(simTime));
+
     Simulator::Run();
+
+    double deliveryRatio = 0.0;
+    if (g_totalGenerated > 0) {
+        deliveryRatio = (double)g_totalDelivered / g_totalGenerated;
+    }
+
+    double avgDelay = 0.0;
+    if (g_totalDelivered > 0) {
+        avgDelay = g_cumulativeDelay / g_totalDelivered;
+    }
+
+    std::cout << "\n--- RISULTATI SIMULAZIONE ---" << std::endl;
+    std::cout << "Threshold \t BufferSize \t Generated \t Delivered \t DeliveryRatio \tAvgDelay(ms)" << std::endl;
+    std::cout << threshold << "\t" 
+              << bufferSize << "\t" 
+              << g_totalGenerated << "\t" 
+              << g_totalDelivered << "\t" 
+              << deliveryRatio << "\t" 
+              << avgDelay << std::endl;
+
+    // 1. Prepariamo lo stream per formattare la threshold
+    std::stringstream stream;
+    stream << std::fixed << std::setprecision(1) << threshold;
+    std::string thresholdStr = stream.str(); 
+
+    std::string filename = "risultati_prophet_time" + std::to_string((int)simTime) 
+                        + "_thr" + thresholdStr + ".csv";
+
+    std::ofstream csvFile;
+    csvFile.open(filename, std::ios_base::app);
+    csvFile << numNodes << "\t" 
+            << threshold << "\t" 
+            << bufferSize << "\t" 
+            << g_totalGenerated << "\t" 
+            << g_totalDelivered << "\t" 
+            << deliveryRatio << "\t" 
+            << avgDelay << "\n";
+
+    csvFile.close();
+
     Simulator::Destroy();
 
     return 0;

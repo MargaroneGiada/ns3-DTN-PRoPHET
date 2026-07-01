@@ -9,7 +9,16 @@ TypeId ProphetApplication::GetTypeId (void) {
     static TypeId tid = TypeId ("ns3::ProphetApplication")
         .SetParent<Application> ()
         .SetGroupName ("Simulazione")
-        .AddConstructor<ProphetApplication> ();
+        .AddConstructor<ProphetApplication> ()
+        .AddTraceSource ("TxData", 
+                         "Trace per i messaggi appena generati",
+                         MakeTraceSourceAccessor (&ProphetApplication::m_txTrace),
+                         "ns3::TracedCallback<uint32_t, uint32_t>") 
+                         
+        .AddTraceSource ("RxData", 
+                         "Trace per i messaggi arrivati a destinazione",
+                         MakeTraceSourceAccessor (&ProphetApplication::m_rxTrace),
+                         "ns3::TracedCallback<uint32_t, uint32_t, double>");
     return tid;
 }
 
@@ -43,6 +52,10 @@ void ProphetApplication::StartApplication() {
     Ptr<UniformRandomVariable> jitter = CreateObject<UniformRandomVariable> ();
     Time delay = MilliSeconds (jitter->GetInteger(0, 50));
     m_beaconTimer = Simulator::Schedule (delay, &ProphetApplication::SendBeacon, this);
+
+    m_localMsgCount = 0; 
+
+    m_trafficTimer = Simulator::Schedule(Seconds(10.0), &ProphetApplication::GenerateTraffic, this);
     
     NS_LOG_INFO ("Nodo " << m_nodeId << " acceso. In ascolto sulla porta 9000.");
 }
@@ -87,7 +100,9 @@ void ProphetApplication::SendBeacon(){
 
     packet->AddHeader(header);
 
-    m_socket->Send(packet);
+    InetSocketAddress broadcastAddr (Ipv4Address::GetBroadcast (), 9000);
+
+    m_socket->SendTo(packet, 0, broadcastAddr);
 
     delete[] buffer;
 
@@ -107,6 +122,7 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
         Ipv4Address senderIp = InetSocketAddress::ConvertFrom(from).GetIpv4();
         uint32_t ipValue = senderIp.Get(); 
         uint32_t neighborId = (ipValue & 0x000000FF) - 1;
+
 
         if (neighborId == m_nodeId) return;
 
@@ -131,6 +147,26 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
 
         m_probTable[neighborId].deliveryProb = pEncounter;
         m_probTable[neighborId].lastUpdateTime = currentTime;
+
+        for (auto it = m_buffer.begin(); it != m_buffer.end(); ) {
+            
+            uint32_t msgDestId = (it->header.GetDestination().Get() & 0x000000FF) - 1;
+
+            if (msgDestId == neighborId) {
+                Ptr<Packet> packetToSend = it->packet->Copy();
+                packetToSend->AddHeader(it->header);
+
+                std::string neighborIpStr = "10.1.1." + std::to_string(neighborId + 1);
+                InetSocketAddress neighborAddr = InetSocketAddress(Ipv4Address(neighborIpStr.c_str()), 9000);
+                
+                m_socket->SendTo(packetToSend, 0, neighborAddr);
+                it = m_buffer.erase(it); 
+                
+                NS_LOG_INFO ("Nodo " << m_nodeId << " ha fatto una CONSEGNA DIRETTA al destinatario " << neighborId);
+            } else {
+                ++it; 
+            }
+        }
 
         uint32_t payloadSize = packet->GetSize();
         uint8_t* buffer = new uint8_t[payloadSize];
@@ -168,7 +204,6 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
                 newDestEntry.deliveryProb = 0.0;
                 m_probTable[destId] = newDestEntry;
             }
-
             
             double myOldProbDest = m_probTable[destId].deliveryProb;
             double pTransitive = myOldProbDest + (1.0 - myOldProbDest) * pEncounter * destProb * BETA;
@@ -182,11 +217,13 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
                 uint32_t msgDestId = (it->header.GetDestination().Get() & 0x000000FF) - 1;
 
                 if (msgDestId == destId) {
-                    
+    
                     double currentMessageRecord = it->header.GetRecord();
 
-                    if (destProb >= (currentMessageRecord + m_threshold)) {
-                        
+                    double requiredJump = m_threshold * (1.0 - currentMessageRecord);
+                    double targetToBeat = currentMessageRecord + requiredJump;
+
+                    if (destProb >= targetToBeat) {
                         it->header.SetRecord(destProb);
 
                         Ptr<Packet> packetToSend = it->packet->Copy();
@@ -198,7 +235,7 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
                         m_socket->SendTo(packetToSend, 0, neighborAddr);
 
                         NS_LOG_INFO ("Nodo " << m_nodeId << " inoltra msg " << it->header.GetMessageId() 
-                                     << " al vicino " << neighborId << " (Nuovo Record: " << destProb << ")");
+                                    << " al vicino " << neighborId << " (Nuovo Record: " << destProb << ")");
                     }
                 }
             }
@@ -206,7 +243,7 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
 
         delete[] buffer;
 
-    }else{
+    }else{ // ricevuti dati
 
         uint32_t msgId = header.GetMessageId();
         Ipv4Address destIp = header.GetDestination();
@@ -219,7 +256,9 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
         m_historyTable.insert(msgId);
         
         if (destId == m_nodeId) {
+        
             double delay = Simulator::Now().GetMilliSeconds() - header.GetTimestamp();
+            m_rxTrace(m_nodeId, msgId, delay);
             NS_LOG_INFO ("CONSEGNATO! Nodo " << m_nodeId << " ha ricevuto il msg " << msgId 
                          << " in " << delay << " ms.");
             
@@ -258,4 +297,60 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
         NS_LOG_INFO ("Nodo " << m_nodeId << " ha ricevuto il DATO " << header.GetMessageId());
 
     }
+}
+
+void ProphetApplication::SetNumNodes (uint32_t n) {
+    m_numNodes = n;
+}
+
+void ProphetApplication::GenerateTraffic(){
+    Ptr<UniformRandomVariable> chance = CreateObject<UniformRandomVariable>();
+    double roll = chance->GetValue(0.0, 1.0);
+
+    if(roll <= 0.05){
+        Ptr<UniformRandomVariable> destChooser = CreateObject<UniformRandomVariable>();
+        uint32_t targetId = destChooser->GetValue(0, m_numNodes - 1);
+
+        if(targetId != m_nodeId){
+            m_localMsgCount++;
+            uint32_t globalMsgId = (m_nodeId << 16 ) | m_localMsgCount;
+
+            Ptr<Packet> packet = Create<Packet>(500);
+            
+            ProphetHeader header;
+            header.SetMessageId(globalMsgId);
+
+            std::string destIpStr = "10.1.1." + std::to_string(targetId + 1);
+            header.SetDestination(Ipv4Address(destIpStr.c_str()));
+
+            header.SetTimestamp(Simulator::Now().GetMilliSeconds());
+
+            double myProb = 0.0;
+            if (m_probTable.find(targetId) != m_probTable.end()) {
+                myProb = m_probTable[targetId].deliveryProb;
+            }
+            header.SetRecord(myProb);
+
+            BufferedMessage newMsg;
+            newMsg.packet = packet;
+            newMsg.header = header;
+
+            m_historyTable.insert(globalMsgId);
+
+            if (m_buffer.size() < m_maxBufferSize) {
+                m_buffer.push_back(newMsg);
+                m_txTrace(m_nodeId, globalMsgId);
+                NS_LOG_INFO("Nodo " << m_nodeId << " ha GENERATO il messaggio " << globalMsgId
+                            << " per il nodo " << targetId);
+            } else {
+                NS_LOG_INFO("Nodo " << m_nodeId << " voleva generare un messaggiom ma ha il buffer PIENO.");
+            }
+
+            
+        }
+    }
+
+    Ptr<UniformRandomVariable> jitter = CreateObject<UniformRandomVariable> ();
+    Time nextCheck = Seconds(5.0) + MilliSeconds(jitter->GetInteger(0, 500));
+    m_trafficTimer = Simulator::Schedule(nextCheck, &ProphetApplication::GenerateTraffic, this);
 }
