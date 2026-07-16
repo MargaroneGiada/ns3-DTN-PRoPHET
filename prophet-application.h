@@ -30,7 +30,7 @@ struct TableEntry {
 
 struct BufferedMessage {
     Ptr<Packet> packet;      
-    ProphetHeader header;    
+    ProphetHeader header;   
 };
 
 class ProphetApplication : public Application {
@@ -46,7 +46,10 @@ private:
     uint32_t m_numNodes;
     uint32_t m_localMsgCount; 
     EventId m_trafficTimer;
-
+    EventId m_cleanupEvent; 
+    Time m_ttl;           
+    
+    void CleanupExpiredPackets(); 
     void SendBeacon ();
     void ReceivePacket (Ptr<Socket> socket);
     TracedCallback<uint32_t, uint32_t> m_txTrace; // trasmissione   
@@ -59,6 +62,7 @@ public:
     static TypeId GetTypeId (void);
 
     void SetThreshold (double t);
+    void SetTTL (Time m_ttl);
     void SetMaxBufferSize (uint32_t size);
 
     void GenerateTraffic (); 

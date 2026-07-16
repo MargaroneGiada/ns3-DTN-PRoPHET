@@ -22,8 +22,10 @@ TypeId ProphetApplication::GetTypeId (void) {
     return tid;
 }
 
+// costruttore
 ProphetApplication::ProphetApplication () {}
 ProphetApplication::~ProphetApplication () {}
+
 
 void ProphetApplication::SetThreshold (double t) {
     m_threshold = t;
@@ -33,11 +35,16 @@ void ProphetApplication::SetMaxBufferSize (uint32_t size) {
     m_maxBufferSize = size; 
 }
 
+void ProphetApplication::SetTTL (Time ttl) {
+    m_ttl = ttl; 
+}
+
+// Inizializza il nodo, il socket UDP e i timer periodici
 void ProphetApplication::StartApplication() {
     m_nodeId = GetNode()->GetId();
 
     TableEntry selfEntry;
-    selfEntry.deliveryProb = 1;
+    selfEntry.deliveryProb = 1; // Probabilità verso sé stessi è sempre 1
     selfEntry.lastUpdateTime = Simulator::Now().GetSeconds();
 
     m_probTable[m_nodeId] = selfEntry;
@@ -49,15 +56,38 @@ void ProphetApplication::StartApplication() {
 
     m_socket->SetRecvCallback (MakeCallback (&ProphetApplication::ReceivePacket, this));
 
+    // aggiunge un quantitativo casuale di millisecondi prima di inviare beacon
     Ptr<UniformRandomVariable> jitter = CreateObject<UniformRandomVariable> ();
     Time delay = MilliSeconds (jitter->GetInteger(0, 50));
     m_beaconTimer = Simulator::Schedule (delay, &ProphetApplication::SendBeacon, this);
 
     m_localMsgCount = 0; 
 
+    // genera traffico una volta ogni 10 secondi
     m_trafficTimer = Simulator::Schedule(Seconds(10.0), &ProphetApplication::GenerateTraffic, this);
+
+    // pulisce i pacchetti deprecati una volta al secondo
+    m_cleanupEvent = Simulator::Schedule(Seconds(1.0), &ProphetApplication::CleanupExpiredPackets, this);
     
     NS_LOG_INFO ("Nodo " << m_nodeId << " acceso. In ascolto sulla porta 9000.");
+}
+
+// rimuove pacchetti con ttl scaduto
+void ProphetApplication::CleanupExpiredPackets() {
+    Time now = Simulator::Now();
+    
+    auto it = std::remove_if(m_buffer.begin(), m_buffer.end(),
+        [&](const BufferedMessage& entry) {
+            Time lifeTime = now - MilliSeconds(entry.header.GetTimestamp());
+            return (lifeTime > m_ttl); 
+        });
+
+    if (it != m_buffer.end()) {
+        m_buffer.erase(it, m_buffer.end());
+        NS_LOG_INFO("Buffer pulito: rimossi pacchetti scaduti");
+    }
+
+    m_cleanupEvent = Simulator::Schedule(Seconds(1.0), &ProphetApplication::CleanupExpiredPackets, this);
 }
 
 void ProphetApplication::StopApplication (void) {
@@ -67,6 +97,7 @@ void ProphetApplication::StopApplication (void) {
     Simulator::Cancel (m_beaconTimer);
 }
 
+// invio pacchetto contenente la propria tabella
 void ProphetApplication::SendBeacon(){
     uint32_t numEntries = m_probTable.size();
     uint32_t payloadSize = 4 + (numEntries * 12); // 4 di int per la size + (4 + 8) * numEntries
@@ -89,6 +120,7 @@ void ProphetApplication::SendBeacon(){
         memcpy(buffer + offset, &prob, 8);
         offset += 8;
     }
+    
 
     Ptr<Packet> packet = Create<Packet> (buffer, payloadSize);
 
@@ -111,12 +143,22 @@ void ProphetApplication::SendBeacon(){
     m_beaconTimer = Simulator::Schedule (nextDelay, &ProphetApplication::SendBeacon, this);
 }
 
+// recezione di un pacchetto
 void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
     Address from;
     Ptr<Packet> packet = socket->RecvFrom (from);
 
     ProphetHeader header;
     packet->RemoveHeader (header);
+
+    Time packetAge = Simulator::Now() - MilliSeconds(header.GetTimestamp());
+    
+    // scarto pacchetti vecchi
+    if (packetAge > m_ttl) {
+        NS_LOG_INFO("Pacchetto scaduto! Droppato.");
+        return; 
+    }
+    
 
     if (header.GetMessageId() == 0) { // beacon
         Ipv4Address senderIp = InetSocketAddress::ConvertFrom(from).GetIpv4();
@@ -142,12 +184,14 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
             m_probTable[neighborId] = newEntry;
         }
 
+        // aggiorna probabilità di incontro diretto
         double oldProb = m_probTable[neighborId].deliveryProb;
         double pEncounter = oldProb + (1.0 - oldProb) * P_INIT;
 
         m_probTable[neighborId].deliveryProb = pEncounter;
         m_probTable[neighborId].lastUpdateTime = currentTime;
 
+        // consegna dei pacchetti se incontro il destinatario diretto
         for (auto it = m_buffer.begin(); it != m_buffer.end(); ) {
             
             uint32_t msgDestId = (it->header.GetDestination().Get() & 0x000000FF) - 1;
@@ -168,6 +212,7 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
             }
         }
 
+        // estrazione tabella ricevuta dal vicino
         uint32_t payloadSize = packet->GetSize();
         uint8_t* buffer = new uint8_t[payloadSize];
         packet->CopyData(buffer, payloadSize);
@@ -179,7 +224,7 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
         uint32_t numEntries = ntohl(netEntries);
         offset += 4;
 
-        // aggiornamento propria tabella in base a quella ricevuta dal vicino
+        // aggiornamento propria tabella in base a quella ricevuta dal vicino (transitività)
         for (uint32_t i = 0; i < numEntries; i++) {
             uint32_t destIdNet;
             double destProb;
@@ -243,18 +288,20 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
 
         delete[] buffer;
 
-    }else{ // ricevuti dati
+    }else{ // dati ricevuti
 
         uint32_t msgId = header.GetMessageId();
         Ipv4Address destIp = header.GetDestination();
         uint32_t destId = (destIp.Get() & 0x000000FF) - 1; 
 
+        // per evitare duplicati
         if (m_historyTable.find(msgId) != m_historyTable.end()) {
             return; 
         }
         
         m_historyTable.insert(msgId);
         
+        // se è destinato a se stesso
         if (destId == m_nodeId) {
         
             double delay = Simulator::Now().GetMilliSeconds() - header.GetTimestamp();
@@ -268,6 +315,8 @@ void ProphetApplication::ReceivePacket(Ptr<Socket> socket){
         BufferedMessage newMsg;
         newMsg.packet = packet; 
         newMsg.header = header;
+
+        // se il buffer è pieno, scarta quello con probabilità di consegna minore
 
         if (m_buffer.size() >= m_maxBufferSize) {
             
@@ -303,13 +352,14 @@ void ProphetApplication::SetNumNodes (uint32_t n) {
     m_numNodes = n;
 }
 
+// genera pacchetto nuovo
 void ProphetApplication::GenerateTraffic(){
     Ptr<UniformRandomVariable> chance = CreateObject<UniformRandomVariable>();
     double roll = chance->GetValue(0.0, 1.0);
 
     if(roll <= 0.05){
         Ptr<UniformRandomVariable> destChooser = CreateObject<UniformRandomVariable>();
-        uint32_t targetId = destChooser->GetValue(0, m_numNodes - 1);
+        uint32_t targetId = destChooser->GetValue(0, m_numNodes - 1); // scelta casuale del destinatario
 
         if(targetId != m_nodeId){
             m_localMsgCount++;
@@ -350,6 +400,7 @@ void ProphetApplication::GenerateTraffic(){
         }
     }
 
+    // aggiunta di tempo scelta casualmente
     Ptr<UniformRandomVariable> jitter = CreateObject<UniformRandomVariable> ();
     Time nextCheck = Seconds(5.0) + MilliSeconds(jitter->GetInteger(0, 500));
     m_trafficTimer = Simulator::Schedule(nextCheck, &ProphetApplication::GenerateTraffic, this);

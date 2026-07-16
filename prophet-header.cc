@@ -3,12 +3,14 @@
 using namespace ns3 ;
 NS_OBJECT_ENSURE_REGISTERED (ProphetHeader);
 
+// costruttore
 ProphetHeader::ProphetHeader () {
     m_messageId = 0;
     m_timestamp = 0;
     m_record = 0.0;
 }
 
+// setter e getter 
 void ProphetHeader::SetMessageId (uint32_t id) { m_messageId = id; }
 uint32_t ProphetHeader::GetMessageId () const { return m_messageId; }
 
@@ -36,6 +38,7 @@ TypeId ProphetHeader::GetInstanceTypeId (void) const {
     return GetTypeId ();
 }
 
+// stampa il contenuto dell'header 
 void ProphetHeader::Print (std::ostream &os) const {
     os << "MsgId=" << m_messageId 
        << " Src=" << m_source 
@@ -44,10 +47,12 @@ void ProphetHeader::Print (std::ostream &os) const {
        << " Record=" << m_record;
 }
 
+// dimensione totale dell'header in byte
 uint32_t ProphetHeader::GetSerializedSize (void) const {
     return 24;
 }
 
+// converte i dati dell'header in una sequenza di byte per la trasmissione
 void ProphetHeader::Serialize (Buffer::Iterator start) const {
     start.WriteHtonU32 (m_messageId);
     start.WriteHtonU32 (m_source.Get ());
@@ -59,6 +64,7 @@ void ProphetHeader::Serialize (Buffer::Iterator start) const {
     start.Write(buf, 8);
 }
 
+// legge la sequenza di byte ricevuta e ricostruisce i dati dell'header
 uint32_t ProphetHeader::Deserialize (Buffer::Iterator start) {
     m_messageId = start.ReadNtohU32 ();
     m_source = Ipv4Address (start.ReadNtohU32 ()); 
